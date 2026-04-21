@@ -1,0 +1,16 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "UDPServer", "UDPServer\UDPServer.csproj", "{F80FF62F-88DA-4496-8D64-4E868C639E19}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{F80FF62F-88DA-4496-8D64-4E868C639E19}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F80FF62F-88DA-4496-8D64-4E868C639E19}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F80FF62F-88DA-4496-8D64-4E868C639E19}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F80FF62F-88DA-4496-8D64-4E868C639E19}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal
