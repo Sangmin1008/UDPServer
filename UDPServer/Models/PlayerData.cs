@@ -19,6 +19,7 @@ public class PlayerData
         Position = Vector3.Zero;
         Rotation = Vector3.Zero;
         LastUpdateTime = DateTime.UtcNow;
+        IsConnected = true;
     }
     
     // 플레이어의 위치와 회전 정보를 업데이트 하는 메서드

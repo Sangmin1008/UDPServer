@@ -33,6 +33,7 @@ public class TimeoutManager
                 if (player.IsConnected && (now - player.LastUpdateTime) > _timeoutDuration)
                 {
                     Console.WriteLine($"[TimeoutManager] {player.PlayerId} 타임아웃 감지");
+                    player.SetConnectionStatus(false);
                     // 타임아웃 이벤트 생성
                     _onPlayerTimeout?.Invoke(player.PlayerId);
                 }
