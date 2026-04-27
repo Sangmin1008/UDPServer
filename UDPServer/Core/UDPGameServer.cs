@@ -134,6 +134,10 @@ public class UDPGameServer
                     Console.WriteLine("[서버] 플레이어 위치 업데이트 요청 수신됨.");
                     HandlePlayerUpdate(packet, clientEP);
                     break;
+                case PacketType.PlayerFire:
+                    Console.WriteLine("[서버] 플레이어 발사 이벤트 수신됨.");
+                    HandlePlayerFire(packet, clientEP);
+                    break;
                 default:
                     break;
             }
@@ -221,6 +225,26 @@ public class UDPGameServer
         else
         {
             Console.WriteLine($"[서버] 플레이어 {packet.PlayerId} 정보 갱신 실패 - 플레이어 존재하지 않음");
+        }
+    }
+
+    private void HandlePlayerFire(NetworkPacket packet, IPEndPoint clientEP)
+    {
+        // 서버에서 해당 플레이어 정보 조회
+        if (_players.TryGetValue(packet.PlayerId, out var player))
+        {
+            // 클라이언트 주소 검증
+            if (player.EndPoint.Equals(clientEP))
+            {
+                Console.WriteLine($"[서버] 플레이어 {player.PlayerId} 발사 이벤트 처리 완료");
+                
+                // 발사 이벤트를 다른 플레이어들에게 전송
+                BroadcastPlayerFire(packet, clientEP);
+            }
+            else
+            {
+                Console.WriteLine($"[서버] 플레이어 {player.PlayerId} 발사 이벤트 처리 실패 - 클라이언트 EP 불일치");
+            }
         }
     }
 
@@ -361,6 +385,37 @@ public class UDPGameServer
         catch (Exception e)
         {
             Console.WriteLine($"[서버] 플레이어 위치 / 회전 업데이트 전송 오류 : {e.Message}");
+        }
+    }
+    
+    // 발사 정보 전송
+    private void BroadcastPlayerFire(NetworkPacket packet, IPEndPoint clientEP)
+    {
+        try
+        {
+            // 플레이어 발사 패킷 생성
+            NetworkPacket firePacket = new NetworkPacket
+            {
+                Type = PacketType.PlayerFire,
+                PlayerId = packet.PlayerId,
+                Position = packet.Position,
+                Rotation = packet.Rotation,
+                Timestamp = DateTime.UtcNow
+            };
+            
+            byte[] data = firePacket.ToBytes();
+            int sentCount = 0;
+            foreach (var existPlayer in _players.Values)
+            {
+                _socket.SendTo(data, existPlayer.EndPoint);
+                sentCount++;
+            }
+            
+            Console.WriteLine($"[서버] 플레이어 {packet.PlayerId} 발사 이벤트 전송 완료 (총 {sentCount}명)");
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine($"[서버] 플레이어 발사 이벤트 전송 오류 : {e.Message}");
         }
     }
     #endregion
