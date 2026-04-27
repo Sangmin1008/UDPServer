@@ -67,11 +67,11 @@ public class NetworkPacket
     }
     
     // UTF-8 바이트 배열을 NetworkPacket 객체로 변환
-    public static NetworkPacket? FromBytes(byte[] data)
+    public static NetworkPacket? FromBytes(byte[] data, int bufferSize)
     {
         try
         {
-            string json = Encoding.UTF8.GetString(data);
+            string json = Encoding.UTF8.GetString(data, 0, bufferSize);
             return FromJsonn(json);
         }
         catch (Exception)

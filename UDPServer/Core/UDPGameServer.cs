@@ -1,4 +1,5 @@
-﻿using System.Collections.Concurrent;
+﻿using System.Buffers;
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using UDPServer.Models;
@@ -12,6 +13,9 @@ public class UDPGameServer
     private bool _isRunning;
     private readonly ConcurrentDictionary<int, PlayerData> _players;
     private int _nextPlayerId;
+    
+    private readonly JobQueue _jobQueue = new JobQueue();
+    private Thread _logicThread;
 
     public UDPGameServer(ServerConfig config)
     {
@@ -57,8 +61,30 @@ public class UDPGameServer
         _isRunning = true;
         Console.WriteLine("[서버] 서버 시작...");
         
+        // 로직 스레드 시작
+        StartLogicThread();
+        
         // 비동기 수신 루프 시작
         await Task.Run(ReceiveLoop);
+    }
+    
+    // 패킷 처리 로직 스레드
+    private void StartLogicThread()
+    {
+        _logicThread = new Thread(() =>
+        {
+            Console.WriteLine("[서버] 로직 스레드 시작");
+            while (_isRunning)
+            {
+                IJob job = _jobQueue.Dequeue();
+                job.Execute();
+            }
+
+            Console.WriteLine("[서버] 로직 스레드 종료");
+        });
+        
+        _logicThread.IsBackground = true;
+        _logicThread.Start();
     }
     
     #endregion
@@ -69,25 +95,40 @@ public class UDPGameServer
     {
         Console.WriteLine("[서버] 수신 루프 시작");
         // 패킷 수신용 버퍼
-        byte[] buffer = new byte[_config.BufferSize];
+        // byte[] buffer = new byte[_config.BufferSize];
         EndPoint clientEP = new IPEndPoint(IPAddress.Any, _config.ServerPort);
         while (_isRunning)
         {
+            // ArrayPool Rent
+            byte[] buffer = ArrayPool<byte>.Shared.Rent(_config.BufferSize);
             try
             {
                 int receiveBytes = _socket.ReceiveFrom(buffer, ref clientEP);
 
                 if (receiveBytes > 0)
                 {
-                    // 수신된 바이트 배열을 실제 데이터 크기 만큼 복사
-                    byte[] data = new byte[receiveBytes];
-                    // 버퍼에서 실제 수신된 데이터만 복사
-                    Array.Copy(buffer, data, receiveBytes);
                     
+                    byte[] data = new byte[receiveBytes];
+                    Buffer.BlockCopy(buffer, 0, data, 0, receiveBytes);
+                    
+                    PacketJob job = new PacketJob(
+                    this,
+                        data,
+                        receiveBytes,
+                        (IPEndPoint)clientEP
+                    );
+                    
+                    _jobQueue.Enqueue(job);
                     Console.WriteLine($"[서버] {clientEP} 로부터 {receiveBytes} 바이트 수산");
                     
-                    // 수신된 데이터 처리 로직 (패킷 파싱)
-                    ProcessPacket(data, (IPEndPoint)clientEP);
+                    // // 수신된 바이트 배열을 실제 데이터 크기 만큼 복사
+                    // byte[] data = new byte[receiveBytes];
+                    // // 버퍼에서 실제 수신된 데이터만 복사
+                    // Array.Copy(buffer, data, receiveBytes);
+                    //
+                    //
+                    // // 수신된 데이터 처리 로직 (패킷 파싱)
+                    // ProcessPacket(data, (IPEndPoint)clientEP);
                 }
             }
             catch (SocketException e)
@@ -98,6 +139,10 @@ public class UDPGameServer
             {
                 Console.WriteLine($"[서버] 수신 오류 발생 : {e.Message}");
             }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
         }
         
         Console.WriteLine("[서버] 수신 루프 종료");
@@ -107,12 +152,12 @@ public class UDPGameServer
 
     #region 패킷 파싱
 
-    private void ProcessPacket(byte[] data, IPEndPoint clientEP)
+    public void ProcessPacket(byte[] data, int bufferSize, IPEndPoint clientEP)
     {
         try
         {
             // 바이트 배열을 NetworkPacket 객체로 변환
-            NetworkPacket? packet = NetworkPacket.FromBytes(data);
+            NetworkPacket? packet = NetworkPacket.FromBytes(data, bufferSize);
 
             if (packet == null)
             {
