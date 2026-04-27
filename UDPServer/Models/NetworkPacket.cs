@@ -15,6 +15,8 @@ public enum PacketType
     PlayerSpawn = 4,    // 플레이어 스폰 요청, 다른 플레이어에게 새 플레이어 접속 알림
     PlayerDespawn = 5,  // 플레이어 디스폰 요청, 다른 플레이어에게 플레이어 접속 종료 알림
     PlayerFire = 6,     // 플레이어 발사 이벤트
+    Heartbeat = 7,      // 하트비트
+    Timeout = 8,        // 플레이어 타임 아웃
 }
 
 public class NetworkPacket

@@ -10,6 +10,7 @@ public class PlayerData
     public Vector3 Rotation { get; set; }
     public IPEndPoint EndPoint { get; set; }
     public DateTime LastUpdateTime { get; set; }
+    public bool IsConnected { get; private set; }
 
     public PlayerData(int playerId, IPEndPoint endPoint)
     {
@@ -25,5 +26,15 @@ public class PlayerData
     {
         Position = position;
         Rotation = rotation;
+    }
+
+    public void RefreshLastUpdateTime()
+    {
+        LastUpdateTime = DateTime.UtcNow;
+    }
+
+    public void SetConnectionStatus(bool isConnected)
+    {
+        IsConnected = isConnected;
     }
 }

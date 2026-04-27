@@ -16,6 +16,6 @@ public class ServerConfig
         MaxPlayers = 100;
         BufferSize = 1024;
         WorkerThreadCount = Environment.ProcessorCount;
-        PlayerTimeoutSeconds = 30;
+        PlayerTimeoutSeconds = 10;
     }
 }

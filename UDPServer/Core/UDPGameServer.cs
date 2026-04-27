@@ -6,13 +6,14 @@ using UDPServer.Models;
 
 namespace UDPServer.Core;
 
-public class UDPGameServer
+public class UDPGameServer : IDisposable
 {
     private readonly ServerConfig _config;
     private Socket _socket;
     private bool _isRunning;
     private readonly ConcurrentDictionary<int, PlayerData> _players;
     private int _nextPlayerId;
+    private TimeoutManager _timeoutManager;
     
     // JobQueue 및 패킷 스레드
     private readonly JobQueue _jobQueue = new JobQueue();
@@ -46,6 +47,9 @@ public class UDPGameServer
             IPEndPoint serverEndPoint = new IPEndPoint(IPAddress.Parse(_config.ServerIP), _config.ServerPort);
             _socket.Bind(serverEndPoint);
             
+            // TimeoutManager 초기화
+            _timeoutManager = new TimeoutManager(_players, _config.PlayerTimeoutSeconds, HandlePlayerTimeout);
+            
             Console.WriteLine($"[서버] 초기화 완료 : {_config.ServerIP}:{_config.ServerPort}");
         }
         catch (Exception e)
@@ -54,7 +58,9 @@ public class UDPGameServer
             throw;
         }
     }
+
     
+
     // 서버 시작 메서드
     public async Task StartAsync()
     {
@@ -187,6 +193,12 @@ public class UDPGameServer
                 Console.WriteLine($"[서버] 잘못된 패킷 형식 수신 from {clientEP}");
                 return;
             }
+            
+            // 모든 패킷 수신시 HeartBeat 처리
+            if (packet.PlayerId > 0 && _players.TryGetValue(packet.PlayerId, out var player))
+            {
+                player.RefreshLastUpdateTime();
+            }
 
             switch (packet.Type)
             {
@@ -206,6 +218,10 @@ public class UDPGameServer
                     Console.WriteLine("[서버] 플레이어 발사 이벤트 수신됨.");
                     HandlePlayerFire(packet, clientEP);
                     break;
+                case PacketType.Heartbeat:
+                    Console.WriteLine("[서버] 하트비트 패킷 수신됨");
+                    HandleHeartBeat(packet, clientEP);
+                    break;
                 default:
                     break;
             }
@@ -219,6 +235,19 @@ public class UDPGameServer
     #endregion
 
     #region 핸들러 메서드
+
+    // 하트비트 패킷 처리
+    private void HandleHeartBeat(NetworkPacket packet, IPEndPoint clientEP)
+    {
+        if (_players.TryGetValue(packet.PlayerId, out var player))
+        {
+            // 클라이언트 주소 검증
+            if (player.EndPoint.Equals(clientEP))
+            {
+                player.RefreshLastUpdateTime();
+            }
+        }
+    }
 
     // 새로운 플레이어 접속 처리
     private void HandlePlayerJoin(NetworkPacket packet, IPEndPoint clientEP)
@@ -316,9 +345,45 @@ public class UDPGameServer
         }
     }
 
+    private void HandlePlayerTimeout(int playerId)
+    {
+        Console.WriteLine($"[서버] 플레이어 {playerId} 타임아웃 처리 중...");
+
+        if (_players.TryGetValue(playerId, out var player))
+        {
+            SendPlayerTimeout(playerId, player.EndPoint);
+        }
+        
+        // 플레이어 정보 제거
+        HandlePlayerLeave(playerId);
+    }
+
+
+
     #endregion
 
     #region 패킷 전송 메서드
+    
+    // 타임아웃 패킷 전송
+    private void SendPlayerTimeout(int playerId, IPEndPoint playerEndPoint)
+    {
+        try
+        {
+            NetworkPacket timeoutPacket = new NetworkPacket
+            {
+                Type = PacketType.Timeout,
+                PlayerId = playerId,
+            };
+
+            byte[] data = timeoutPacket.ToBytes();
+            _socket.SendTo(data, playerEndPoint);
+            Console.WriteLine($"[서버] 플레이어 {playerId} 타임아웃 패킷 전송 완료 to {playerEndPoint}");
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine(e.Message);
+        }
+    }
 
     // PlayerSpawn 패킷 전송
     private void SendPlayerSpawn(PlayerData player, IPEndPoint clientEP)
@@ -414,6 +479,9 @@ public class UDPGameServer
                 sentCount++;
             }
             
+            // 플레이어 정보 제거
+            _players.TryRemove(removedPlayerId, out _);
+            
             Console.WriteLine($"[서버] 플레이어 {removedPlayerId} 접속 해제 알림 전송 완료 (총 {sentCount}명)");
         }
         catch (Exception e)
@@ -487,4 +555,14 @@ public class UDPGameServer
         }
     }
     #endregion
+
+    public void Dispose()
+    {
+        if (!_isRunning) return;
+        _isRunning = false;
+        _players.Clear();
+        _socket.Dispose();
+        
+        Console.WriteLine("[서버] UDP 게임 서버 종료");
+    }
 }
