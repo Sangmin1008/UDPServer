@@ -15,6 +15,10 @@ public class UDPGameServer : IDisposable
     private int _nextPlayerId;
     private TimeoutManager _timeoutManager;
     
+    // 서버 통계 수집
+    private readonly ServerStats _stats;
+    
+    
     // JobQueue 및 패킷 스레드
     private readonly JobQueue _jobQueue = new JobQueue();
     private Thread _logicThread;
@@ -29,6 +33,7 @@ public class UDPGameServer : IDisposable
         _players = new ConcurrentDictionary<int, PlayerData>();
         _nextPlayerId = 0;
         _isRunning = false;
+        _stats = new ServerStats(() => _players.Count);
     }
 
 
@@ -136,6 +141,8 @@ public class UDPGameServer : IDisposable
 
                 if (receiveBytes > 0)
                 {
+                    // 수신 패킷 증가
+                    _stats.IncrementReceivedPackets();
                     
                     byte[] data = new byte[receiveBytes];
                     Buffer.BlockCopy(buffer, 0, data, 0, receiveBytes);
@@ -270,6 +277,8 @@ public class UDPGameServer : IDisposable
         if (_players.TryAdd(newPlayerId, newPlayer))
         {
             Console.WriteLine($"[서버] 플레이어 {newPlayerId} 접속 성공 : {clientEP}");
+            // 접속 통계 갱신
+            _stats.IncrementJoins(_players.Count);
             // 플레이어 접속 성공 응답 전송 (PacketType.PlayerSpawn)
             SendPlayerSpawn(newPlayer, clientEP);
             // 다른 플레이어들에게 새 플레이어 접속 알림 전송
@@ -377,6 +386,8 @@ public class UDPGameServer : IDisposable
 
             byte[] data = timeoutPacket.ToBytes();
             _socket.SendTo(data, playerEndPoint);
+            
+            _stats.IncrementSentPackets();
             Console.WriteLine($"[서버] 플레이어 {playerId} 타임아웃 패킷 전송 완료 to {playerEndPoint}");
         }
         catch (Exception e)
@@ -404,6 +415,8 @@ public class UDPGameServer : IDisposable
             byte[] data = packet.ToBytes();
             // 클라이언트에게 패킷 전송
             _socket.SendTo(data, clientEP);
+            
+            _stats.IncrementSentPackets();
             
             Console.WriteLine($"[서버] PlayerSpawn 패킷 전송 성공 to {clientEP}");
         }
@@ -478,6 +491,7 @@ public class UDPGameServer : IDisposable
                 _socket.SendTo(data, existPlayer.EndPoint);
                 sentCount++;
             }
+            _stats.IncrementSentPackets(sentCount);
             
             // 플레이어 정보 제거
             _players.TryRemove(removedPlayerId, out _);
@@ -515,6 +529,8 @@ public class UDPGameServer : IDisposable
                     sentCount++;
                 }
             }
+            
+            _stats.IncrementSentPackets(sentCount);
             
             Console.WriteLine($"[서버] 플레이어 {packet.PlayerId} 위치 / 회전 업데이트 전송 완료 (총 {sentCount}명)");
         }
@@ -562,6 +578,7 @@ public class UDPGameServer : IDisposable
         _isRunning = false;
         _players.Clear();
         _socket.Dispose();
+        _stats.Dispose();
         
         Console.WriteLine("[서버] UDP 게임 서버 종료");
     }
