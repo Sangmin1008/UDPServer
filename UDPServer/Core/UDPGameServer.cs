@@ -14,8 +14,13 @@ public class UDPGameServer
     private readonly ConcurrentDictionary<int, PlayerData> _players;
     private int _nextPlayerId;
     
+    // JobQueue 및 패킷 스레드
     private readonly JobQueue _jobQueue = new JobQueue();
     private Thread _logicThread;
+    
+    // 멀티스레드 패킷 처리
+    private Thread[] _workerThreads;
+    private const int WORKER_THREAD_COUNT = 10;
 
     public UDPGameServer(ServerConfig config)
     {
@@ -71,20 +76,38 @@ public class UDPGameServer
     // 패킷 처리 로직 스레드
     private void StartLogicThread()
     {
-        _logicThread = new Thread(() =>
+        _workerThreads = new Thread[WORKER_THREAD_COUNT];
+
+        for (int i = 0; i < WORKER_THREAD_COUNT; i++)
         {
-            Console.WriteLine("[서버] 로직 스레드 시작");
-            while (_isRunning)
+            int threadId = i;
+            _workerThreads[i] = new Thread(() => WorkerThreadLoop(threadId));
+            _workerThreads[i].IsBackground = true;
+            _workerThreads[i].Start();
+        }
+        
+        Console.WriteLine($"[서버] 패킷 처리용 워커 스레드 {WORKER_THREAD_COUNT}개 시작");
+    }
+
+    private void WorkerThreadLoop(int threadId)
+    {
+        int processCount = 0;
+        while (_isRunning)
+        {
+            try
             {
                 IJob job = _jobQueue.Dequeue();
                 job.Execute();
-            }
 
-            Console.WriteLine("[서버] 로직 스레드 종료");
-        });
-        
-        _logicThread.IsBackground = true;
-        _logicThread.Start();
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine($"[서버] 워커 스레드 {threadId} 패킷 처리 완료 (총: {++processCount})");
+                Console.ResetColor();
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine($"[서버] 워커 스레드 {threadId} 실행 오류 : {e.Message}");
+            }
+        }
     }
     
     #endregion
