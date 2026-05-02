@@ -23,7 +23,7 @@ class Program
         {
             Console.WriteLine($"[서버] 치명적 오류 발생 : {e.Message}");
             Console.WriteLine("아무키나 눌러서 종료하세요...");
-            Console.ReadKey();
+            // Console.ReadKey();
         }
     }
 }
