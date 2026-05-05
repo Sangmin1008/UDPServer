@@ -17,6 +17,7 @@ public enum PacketType
     PlayerFire = 6,     // 플레이어 발사 이벤트
     Heartbeat = 7,      // 하트비트
     Timeout = 8,        // 플레이어 타임 아웃
+    PlayerHit = 9,      // 플레이어 피격 이벤트
 }
 
 public class NetworkPacket
@@ -30,6 +31,8 @@ public class NetworkPacket
     
     [JsonConverter(typeof(Vector3Converter))]
     public Vector3 Rotation { get; set; }
+    public int TargetId { get; set; }
+    public int Damage { get; set; }
     
     // 패킷 생성 시간
     public DateTime Timestamp { get; set; }

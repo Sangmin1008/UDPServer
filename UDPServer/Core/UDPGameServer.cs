@@ -225,6 +225,10 @@ public class UDPGameServer : IDisposable
                     Console.WriteLine("[서버] 플레이어 발사 이벤트 수신됨.");
                     HandlePlayerFire(packet, clientEP);
                     break;
+                case PacketType.PlayerHit:
+                    Console.WriteLine("[서버] 플레이어 피격 이벤트 수신됨.");
+                    HandlePlayerHit(packet, clientEP);
+                    break;
                 case PacketType.Heartbeat:
                     Console.WriteLine("[서버] 하트비트 패킷 수신됨");
                     HandleHeartBeat(packet, clientEP);
@@ -367,7 +371,25 @@ public class UDPGameServer : IDisposable
         HandlePlayerLeave(playerId);
     }
 
-
+    private void HandlePlayerHit(NetworkPacket packet, IPEndPoint clientEP)
+    {
+        // 서버에서 해당 공격자(쏜 사람) 정보 조회
+        if (_players.TryGetValue(packet.PlayerId, out var player))
+        {
+            // 클라이언트 주소 검증
+            if (player.EndPoint.Equals(clientEP))
+            {
+                Console.WriteLine($"[서버] 플레이어 {packet.PlayerId}가 플레이어 {packet.TargetId}를 명중! (데미지: {packet.Damage})");
+                
+                // 피격 이벤트를 모든 플레이어에게 브로드캐스트
+                BroadcastPlayerHit(packet, clientEP);
+            }
+            else
+            {
+                Console.WriteLine($"[서버] 플레이어 {packet.PlayerId} 피격 이벤트 처리 실패 - 클라이언트 EP 불일치");
+            }
+        }
+    }
 
     #endregion
 
@@ -568,6 +590,38 @@ public class UDPGameServer : IDisposable
         catch (Exception e)
         {
             Console.WriteLine($"[서버] 플레이어 발사 이벤트 전송 오류 : {e.Message}");
+        }
+    }
+    
+    private void BroadcastPlayerHit(NetworkPacket packet, IPEndPoint clientEP)
+    {
+        try
+        {
+            // 피격 에코 패킷 생성
+            NetworkPacket hitPacket = new NetworkPacket
+            {
+                Type = PacketType.PlayerHit,
+                PlayerId = packet.PlayerId, // 쏜 사람
+                TargetId = packet.TargetId, // 맞은 사람
+                Damage = packet.Damage,     // 데미지
+                Timestamp = DateTime.UtcNow
+            };
+            
+            byte[] data = hitPacket.ToBytes();
+            int sentCount = 0;
+            
+            foreach (var existPlayer in _players.Values)
+            {
+                _socket.SendTo(data, existPlayer.EndPoint);
+                sentCount++;
+            }
+            
+            _stats.IncrementSentPackets(sentCount);
+            Console.WriteLine($"[서버] 플레이어 피격 이벤트 전송 완료 (총 {sentCount}명)");
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine($"[서버] 플레이어 피격 이벤트 전송 오류 : {e.Message}");
         }
     }
     #endregion
