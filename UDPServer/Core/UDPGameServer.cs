@@ -2,6 +2,7 @@
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
+using System.Numerics;
 using UDPServer.Models;
 
 namespace UDPServer.Core;
@@ -14,6 +15,10 @@ public class UDPGameServer : IDisposable
     private readonly ConcurrentDictionary<int, PlayerData> _players;
     private int _nextPlayerId;
     private TimeoutManager _timeoutManager;
+    
+    private int _nextItemId = 0;
+    private readonly ConcurrentDictionary<int, NetworkPacket> _activeItems;
+    private CancellationTokenSource? _itemSpawnCts;
     
     // 서버 통계 수집
     private readonly ServerStats _stats;
@@ -34,6 +39,7 @@ public class UDPGameServer : IDisposable
         _nextPlayerId = 0;
         _isRunning = false;
         _stats = new ServerStats(() => _players.Count);
+        _activeItems = new ConcurrentDictionary<int, NetworkPacket>();
     }
 
 
@@ -79,6 +85,9 @@ public class UDPGameServer : IDisposable
         
         // 로직 스레드 시작
         StartLogicThread();
+        
+        _itemSpawnCts = new CancellationTokenSource();
+        _ = ItemSpawnLoopAsync(_itemSpawnCts.Token);
         
         // 비동기 수신 루프 시작
         await Task.Run(ReceiveLoop);
@@ -186,6 +195,68 @@ public class UDPGameServer : IDisposable
 
     #endregion
 
+    #region 아이템 스폰 로직
+
+    private async Task ItemSpawnLoopAsync(CancellationToken token)
+    {
+        Console.WriteLine("[서버] 아이템 스폰 루프 가동 시작");
+        Random random = new Random();
+
+        try
+        {
+            while (_isRunning && !token.IsCancellationRequested)
+            {
+                // 10초 ~ 15초 사이의 무작위 대기 시간
+                int waitTime = random.Next(10000, 15000);
+                await Task.Delay(waitTime, token);
+
+                // 💡 접속한 플레이어가 2명 이상일 때만 스폰
+                if (_players.Count >= 2)
+                {
+                    SpawnRandomItem(random);
+                }
+            }
+        }
+        catch (TaskCanceledException)
+        {
+            Console.WriteLine("[서버] 아이템 스폰 루프가 안전하게 종료되었습니다.");
+        }
+    }
+
+    private void SpawnRandomItem(Random random)
+    {
+        int itemId = Interlocked.Increment(ref _nextItemId);
+        int itemType = random.Next(1, 4); 
+
+        float spawnX = (random.NextSingle() * 40f) - 20f;
+        float spawnZ = (random.NextSingle() * 40f) - 20f;
+        Vector3 spawnPos = new Vector3(spawnX, 15f, spawnZ);
+
+        NetworkPacket itemPacket = new NetworkPacket
+        {
+            Type = PacketType.ItemSpawn,
+            ItemId = itemId,
+            ItemType = itemType,
+            Position = spawnPos,
+            Timestamp = DateTime.UtcNow
+        };
+
+        _activeItems.TryAdd(itemId, itemPacket);
+
+        byte[] data = itemPacket.ToBytes();
+        int sentCount = 0;
+        foreach (var player in _players.Values)
+        {
+            _socket.SendTo(data, player.EndPoint);
+            sentCount++;
+        }
+        
+        _stats.IncrementSentPackets(sentCount);
+        Console.WriteLine($"[서버] 아이템 스폰 (ID:{itemId}, 타입:{itemType}, 인원:{_players.Count}명)");
+    }
+
+    #endregion
+
     #region 패킷 파싱
 
     public void ProcessPacket(byte[] data, int bufferSize, IPEndPoint clientEP)
@@ -232,6 +303,10 @@ public class UDPGameServer : IDisposable
                 case PacketType.Heartbeat:
                     Console.WriteLine("[서버] 하트비트 패킷 수신됨");
                     HandleHeartBeat(packet, clientEP);
+                    break;
+                case PacketType.ItemPickup:
+                    Console.WriteLine("[서버] 아이템 획득 요청 수신됨.");
+                    HandleItemPickup(packet, clientEP);
                     break;
                 default:
                     break;
@@ -387,6 +462,30 @@ public class UDPGameServer : IDisposable
             else
             {
                 Console.WriteLine($"[서버] 플레이어 {packet.PlayerId} 피격 이벤트 처리 실패 - 클라이언트 EP 불일치");
+            }
+        }
+    }
+    
+    private void HandleItemPickup(NetworkPacket packet, IPEndPoint clientEP)
+    {
+        // 요청을 보낸 플레이어가 유효한지 검증
+        if (_players.TryGetValue(packet.PlayerId, out var player))
+        {
+            if (player.EndPoint.Equals(clientEP))
+            {
+                // [서버 판정] 아이템이 아직 맵에 존재하는가?
+                if (_activeItems.TryRemove(packet.ItemId, out NetworkPacket itemPacket))
+                {
+                    Console.WriteLine($"[서버] 플레이어 {packet.PlayerId}가 아이템 {packet.ItemId}(타입:{itemPacket.ItemType}) 획득 성공!");
+                    
+                    // 모두에게 아이템이 소비되었음을 알림
+                    BroadcastItemConsumed(packet.ItemId, packet.PlayerId, itemPacket.ItemType);
+                }
+                else
+                {
+                    // 0.1초 차이로 다른 플레이어가 먼저 먹었거나, 없는 아이템인 경우
+                    Console.WriteLine($"[서버] 플레이어 {packet.PlayerId}의 아이템 {packet.ItemId} 획득 실패 (이미 소진됨)");
+                }
             }
         }
     }
@@ -624,6 +723,37 @@ public class UDPGameServer : IDisposable
             Console.WriteLine($"[서버] 플레이어 피격 이벤트 전송 오류 : {e.Message}");
         }
     }
+    
+    private void BroadcastItemConsumed(int itemId, int playerId, int itemType)
+    {
+        try
+        {
+            NetworkPacket consumedPacket = new NetworkPacket
+            {
+                Type = PacketType.ItemConsumed,
+                ItemId = itemId,
+                PlayerId = playerId,
+                ItemType = itemType,
+                Timestamp = DateTime.UtcNow
+            };
+
+            byte[] data = consumedPacket.ToBytes();
+            int sentCount = 0;
+            
+            foreach (var existPlayer in _players.Values)
+            {
+                _socket.SendTo(data, existPlayer.EndPoint);
+                sentCount++;
+            }
+            
+            _stats.IncrementSentPackets(sentCount);
+            Console.WriteLine($"[서버] 아이템 {itemId} 소비 알림 전송 완료 (총 {sentCount}명)");
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine($"[서버] 아이템 소비 알림 전송 오류 : {e.Message}");
+        }
+    }
     #endregion
 
     public void Dispose()
@@ -633,6 +763,9 @@ public class UDPGameServer : IDisposable
         _players.Clear();
         _socket.Dispose();
         _stats.Dispose();
+        _itemSpawnCts?.Cancel();
+        _itemSpawnCts?.Dispose();
+        _activeItems.Clear();
         
         Console.WriteLine("[서버] UDP 게임 서버 종료");
     }

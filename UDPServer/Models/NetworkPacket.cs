@@ -18,6 +18,9 @@ public enum PacketType
     Heartbeat = 7,      // 하트비트
     Timeout = 8,        // 플레이어 타임 아웃
     PlayerHit = 9,      // 플레이어 피격 이벤트
+    ItemSpawn = 10,     // 아이템 스폰
+    ItemPickup = 11,    // 아이템 픽업
+    ItemConsumed = 12   // 아이템 소비
 }
 
 public class NetworkPacket
@@ -33,6 +36,9 @@ public class NetworkPacket
     public Vector3 Rotation { get; set; }
     public int TargetId { get; set; }
     public int Damage { get; set; }
+    
+    public int ItemId { get; set; }
+    public int ItemType { get; set; }
     
     // 패킷 생성 시간
     public DateTime Timestamp { get; set; }
