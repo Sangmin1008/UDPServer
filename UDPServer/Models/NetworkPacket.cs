@@ -20,7 +20,8 @@ public enum PacketType
     PlayerHit = 9,      // 플레이어 피격 이벤트
     ItemSpawn = 10,     // 아이템 스폰
     ItemPickup = 11,    // 아이템 픽업
-    ItemConsumed = 12   // 아이템 소비
+    ItemConsumed = 12,   // 아이템 소비
+    PlayerEmoticon = 13,
 }
 
 public class NetworkPacket
@@ -36,9 +37,9 @@ public class NetworkPacket
     public Vector3 Rotation { get; set; }
     public int TargetId { get; set; }
     public int Damage { get; set; }
-    
     public int ItemId { get; set; }
     public int ItemType { get; set; }
+    public int EmoticonId { get; set; }
     
     // 패킷 생성 시간
     public DateTime Timestamp { get; set; }
@@ -56,7 +57,7 @@ public class NetworkPacket
         return JsonSerializer.Serialize(this);
     }
 
-    public static NetworkPacket? FromJsonn(string json)
+    public static NetworkPacket? FromJson(string json)
     {
         try
         {
@@ -83,7 +84,7 @@ public class NetworkPacket
         try
         {
             string json = Encoding.UTF8.GetString(data, 0, bufferSize);
-            return FromJsonn(json);
+            return FromJson(json);
         }
         catch (Exception)
         {

@@ -301,12 +301,16 @@ public class UDPGameServer : IDisposable
                     HandlePlayerHit(packet, clientEP);
                     break;
                 case PacketType.Heartbeat:
-                    Console.WriteLine("[서버] 하트비트 패킷 수신됨");
+                    Console.WriteLine("[서버] 하트비트 패킷 수신됨.");
                     HandleHeartBeat(packet, clientEP);
                     break;
                 case PacketType.ItemPickup:
                     Console.WriteLine("[서버] 아이템 획득 요청 수신됨.");
                     HandleItemPickup(packet, clientEP);
+                    break;
+                case PacketType.PlayerEmoticon:
+                    Console.WriteLine("[서버] 플레이어 이모티콘 이벤트 수신됨.");
+                    HandleEmoticon(packet, clientEP);
                     break;
                 default:
                     break;
@@ -474,7 +478,7 @@ public class UDPGameServer : IDisposable
             if (player.EndPoint.Equals(clientEP))
             {
                 // [서버 판정] 아이템이 아직 맵에 존재하는가?
-                if (_activeItems.TryRemove(packet.ItemId, out NetworkPacket itemPacket))
+                if (_activeItems.TryRemove(packet.ItemId, out var itemPacket))
                 {
                     Console.WriteLine($"[서버] 플레이어 {packet.PlayerId}가 아이템 {packet.ItemId}(타입:{itemPacket.ItemType}) 획득 성공!");
                     
@@ -489,6 +493,28 @@ public class UDPGameServer : IDisposable
             }
         }
     }
+
+    private void HandleEmoticon(NetworkPacket packet, IPEndPoint clientEP)
+    {
+        if (_players.TryGetValue(packet.PlayerId, out var player))
+        {
+            if (player.EndPoint.Equals(clientEP))
+            {
+                Console.WriteLine($"[서버] 플레이어 {player.PlayerId} 이모티콘 이벤트 처리 완료");
+                BroadcastPlayerEmoticon(packet.EmoticonId, packet.PlayerId);
+            }
+            else
+            {
+                Console.WriteLine($"[서버] 플레이어 {player.PlayerId} 정보 갱신 실패 - 클라이언트 EP 불일치");
+            }
+        }
+        else
+        {
+            Console.WriteLine($"[서버] 플레이어 {packet.PlayerId} 정보 갱신 실패 - 플레이어 존재하지 않음");
+        }
+    }
+
+    
 
     #endregion
 
@@ -754,6 +780,37 @@ public class UDPGameServer : IDisposable
             Console.WriteLine($"[서버] 아이템 소비 알림 전송 오류 : {e.Message}");
         }
     }
+    
+    private void BroadcastPlayerEmoticon(int packetEmoticonId, int packetPlayerId)
+    {
+        try
+        {
+            NetworkPacket emoticonPacket = new NetworkPacket
+            {
+                Type = PacketType.PlayerEmoticon,
+                PlayerId = packetPlayerId,
+                EmoticonId = packetEmoticonId,
+                Timestamp = DateTime.UtcNow
+            };
+            
+            byte[] data = emoticonPacket.ToBytes();
+            int sentCount = 0;
+
+            foreach (var existPlayer in _players.Values)
+            {
+                _socket.SendTo(data, existPlayer.EndPoint);
+                sentCount++;
+            }
+            
+            _stats.IncrementSentPackets(sentCount);
+            Console.WriteLine($"[서버] 플레이어 이모티콘 {packetEmoticonId} 사용 알림 전송 완료 (총 {sentCount}명)");
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine($"[서버] 이모티콘 알림 전송 오류 : {e.Message}");
+        }
+    }
+    
     #endregion
 
     public void Dispose()
