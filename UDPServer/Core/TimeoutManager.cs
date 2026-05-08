@@ -20,7 +20,7 @@ public class TimeoutManager
         _timeoutTimer = new Timer(CheckTimeout, null, 1000, 1000);
     }
 
-    private void CheckTimeout(object state)
+    private void CheckTimeout(object? state)
     {
         if (_isDisposed) return;
 

@@ -20,12 +20,16 @@ public enum PacketType
     PlayerHit = 9,      // 플레이어 피격 이벤트
     ItemSpawn = 10,     // 아이템 스폰
     ItemPickup = 11,    // 아이템 픽업
-    ItemConsumed = 12,   // 아이템 소비
-    PlayerEmoticon = 13,
+    ItemConsumed = 12,  // 아이템 소비
+    PlayerEmoticon = 13,// 이모티콘
+    
+    Ack = 99            // 수신 확인 응답
 }
 
 public class NetworkPacket
 {
+    public uint Sequence { get; set; }
+    public bool IsReliable { get; set; }
     public PacketType Type { get; set; }
     public int PlayerId { get; set; }
     

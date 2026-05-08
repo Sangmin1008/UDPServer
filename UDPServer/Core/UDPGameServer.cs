@@ -15,6 +15,14 @@ public class UDPGameServer : IDisposable
     private readonly ConcurrentDictionary<int, PlayerData> _players;
     private int _nextPlayerId;
     private TimeoutManager _timeoutManager;
+
+    private long _nextSequence = 1;
+    private readonly ConcurrentDictionary<uint, PendingPacket> _pendingPackets;
+    private Timer _watchdogTimer;
+    private readonly ConcurrentDictionary<string, byte> _processedReliablePackets = new();
+    private readonly object _joinLock = new();
+    private readonly ConcurrentDictionary<string, int> _endpointToPlayerId = new();
+    
     
     private int _nextItemId = 0;
     private readonly ConcurrentDictionary<int, NetworkPacket> _activeItems;
@@ -26,7 +34,6 @@ public class UDPGameServer : IDisposable
     
     // JobQueue 및 패킷 스레드
     private readonly JobQueue _jobQueue = new JobQueue();
-    private Thread _logicThread;
     
     // 멀티스레드 패킷 처리
     private Thread[] _workerThreads;
@@ -40,6 +47,7 @@ public class UDPGameServer : IDisposable
         _isRunning = false;
         _stats = new ServerStats(() => _players.Count);
         _activeItems = new ConcurrentDictionary<int, NetworkPacket>();
+        _pendingPackets = new ConcurrentDictionary<uint, PendingPacket>();
     }
 
 
@@ -60,6 +68,8 @@ public class UDPGameServer : IDisposable
             
             // TimeoutManager 초기화
             _timeoutManager = new TimeoutManager(_players, _config.PlayerTimeoutSeconds, HandlePlayerTimeout);
+            
+            _watchdogTimer = new Timer(CheckPendingPackets, null, 100, 100);
             
             Console.WriteLine($"[서버] 초기화 완료 : {_config.ServerIP}:{_config.ServerPort}");
         }
@@ -130,6 +140,20 @@ public class UDPGameServer : IDisposable
         }
     }
     
+    #endregion
+
+    #region 키 헬퍼
+
+    private static string GetEndpointKey(IPEndPoint ep)
+    {
+        return $"{ep.Address}:{ep.Port}";
+    }
+
+    private static string GetReliableKey(IPEndPoint ep, uint sequence)
+    {
+        return $"{ep.Address}:{ep.Port}:{sequence}";
+    }
+
     #endregion
 
     #region 메시지 수신 루프
@@ -277,6 +301,30 @@ public class UDPGameServer : IDisposable
             {
                 player.RefreshLastUpdateTime();
             }
+            
+            // 클라이언트가 패킷을 잘 받았다고 패킷을 보냄
+            if (packet.Type == PacketType.Ack)
+            {
+                if (_pendingPackets.TryRemove(packet.Sequence, out _))
+                {
+                    Console.WriteLine($"[서버] 패킷 {packet.Sequence} 수신 확인 완료.");
+                }
+                return;
+            }
+
+            // 클라이언트가 보낸 중요한 패킷(Hit, Item 등)을 서버가 받은 경우 -> 서버도 Ack를 답장해줌
+            if (packet.IsReliable)
+            {
+                string reliableKey = GetReliableKey(clientEP, packet.Sequence);
+
+                if (!_processedReliablePackets.TryAdd(reliableKey, 0))
+                {
+                    SendAck(packet.Sequence, clientEP);
+                    return;
+                }
+
+                SendAck(packet.Sequence, clientEP);
+            }
 
             switch (packet.Type)
             {
@@ -321,6 +369,56 @@ public class UDPGameServer : IDisposable
             Console.WriteLine($"[서버] 패킷 처리 오류 : {e.Message}");
         }
     }
+    
+    private void SendAck(uint receivedSequence, IPEndPoint clientEP)
+    {
+        NetworkPacket ackPacket = new NetworkPacket
+        {
+            Type = PacketType.Ack,
+            Sequence = receivedSequence
+        };
+
+        _socket.SendTo(ackPacket.ToBytes(), clientEP);
+    }
+    
+
+
+    #endregion
+
+    #region 재전송 타이머
+
+    private void CheckPendingPackets(object? state)
+    {
+        if (!_isRunning) return;
+
+        DateTime now = DateTime.UtcNow;
+
+        foreach (var kvp in _pendingPackets)
+        {
+            var pending = kvp.Value;
+            
+            // 보낸 지 200ms가 넘었는데 아직 안 지워졌다면 유실 간주
+            if ((now - pending.LastSentTime).TotalMilliseconds > 200)
+            {
+                if (pending.RetryCount < 5) // 최대 5회 재전송
+                {
+                    pending.RetryCount++;
+                    pending.LastSentTime = now;
+                    
+                    // 다시 전송
+                    byte[] data = pending.Packet.ToBytes();
+                    _socket.SendTo(data, pending.TargetEndPoint);
+                    Console.WriteLine($"[서버] 패킷 {kvp.Key}({pending.Packet.Type}) 재전송 시도 {pending.RetryCount}회");
+                }
+                else
+                {
+                    // 5회 모두 실패하면 포기하고 장부에서 삭제
+                    Console.WriteLine($"[서버] 패킷 {kvp.Key} 최종 전송 실패. 타임아웃 처리");
+                    _pendingPackets.TryRemove(kvp.Key, out _);
+                }
+            }
+        }
+    }
 
     #endregion
 
@@ -342,37 +440,43 @@ public class UDPGameServer : IDisposable
     // 새로운 플레이어 접속 처리
     private void HandlePlayerJoin(NetworkPacket packet, IPEndPoint clientEP)
     {
-        // 최대 플레이어 수 확인
-        if (_players.Count >= _config.MaxPlayers)
+        string endpointKey = GetEndpointKey(clientEP);
+
+        lock (_joinLock)
         {
-            Console.WriteLine($"[서버] 최대 플레이어 수 초과. 접속 거부 : {clientEP}");
-            return;
-        }
-        
-        // 새로운 플레이어 ID 할당 (스레드 안전하게 증가)
-        int newPlayerId = Interlocked.Increment(ref _nextPlayerId);
-        
-        PlayerData newPlayer = new PlayerData(newPlayerId, clientEP);
-        // 초기 위치와 회전 설정
-        newPlayer.UpdateTransform(packet.Position, packet.Rotation);
-        
-        // 플레이어 등록
-        if (_players.TryAdd(newPlayerId, newPlayer))
-        {
+            if (_endpointToPlayerId.ContainsKey(endpointKey))
+            {
+                Console.WriteLine($"[서버] 중복 Join 요청 무시 : {clientEP}");
+                return;
+            }
+
+            if (_players.Count >= _config.MaxPlayers)
+            {
+                Console.WriteLine($"[서버] 최대 플레이어 수 초과. 접속 거부 : {clientEP}");
+                return;
+            }
+
+            int newPlayerId = Interlocked.Increment(ref _nextPlayerId);
+            PlayerData newPlayer = new PlayerData(newPlayerId, clientEP);
+            newPlayer.UpdateTransform(packet.Position, packet.Rotation);
+
+            if (!_players.TryAdd(newPlayerId, newPlayer))
+            {
+                Console.WriteLine($"[서버] 플레이어 {newPlayerId} 등록 실패 : {clientEP}");
+                return;
+            }
+
+            _endpointToPlayerId[endpointKey] = newPlayerId;
+
             Console.WriteLine($"[서버] 플레이어 {newPlayerId} 접속 성공 : {clientEP}");
-            // 접속 통계 갱신
-            _stats.IncrementJoins(_players.Count);
-            // 플레이어 접속 성공 응답 전송 (PacketType.PlayerSpawn)
-            SendPlayerSpawn(newPlayer, clientEP);
-            // 다른 플레이어들에게 새 플레이어 접속 알림 전송
-            BroadcastPlayerSpawn(newPlayer);
-            // 새 플레이어에게 기존 플레이어 정보 전송
-            SendExistingPlayers(clientEP);
         }
-        else
-        {
-            Console.WriteLine($"[서버] 플레이어 {newPlayerId} 등록 실패 : {clientEP}");
-        }
+
+        // 락 밖에서 전송
+        _stats.IncrementJoins(_players.Count);
+
+        SendPlayerSpawn(_players.Values.First(p => p.EndPoint.Equals(clientEP)), clientEP);
+        BroadcastPlayerSpawn(_players.Values.First(p => p.EndPoint.Equals(clientEP)));
+        SendExistingPlayers(clientEP);
     }
     
     // 플레이어 접속 종료 처리
@@ -380,6 +484,7 @@ public class UDPGameServer : IDisposable
     {
         if (_players.TryRemove(playerId, out PlayerData removedPlayer))
         {
+            _endpointToPlayerId.TryRemove(GetEndpointKey(removedPlayer.EndPoint), out _);
             Console.WriteLine($"[서버] 플레이어 접속해제 - id: {removedPlayer.PlayerId}, EP: {removedPlayer.EndPoint}");
             
             // 다른 플레이어에게 접속 해제 알림 전송
@@ -520,6 +625,46 @@ public class UDPGameServer : IDisposable
 
     #region 패킷 전송 메서드
     
+    private NetworkPacket ClonePacket(NetworkPacket src)
+    {
+        return new NetworkPacket
+        {
+            Type = src.Type,
+            PlayerId = src.PlayerId,
+            TargetId = src.TargetId,
+            ItemId = src.ItemId,
+            ItemType = src.ItemType,
+            EmoticonId = src.EmoticonId,
+            Damage = src.Damage,
+            Position = src.Position,
+            Rotation = src.Rotation,
+            Timestamp = src.Timestamp,
+            Sequence = src.Sequence,
+            IsReliable = src.IsReliable
+        };
+    }
+    
+    // 중요 데이터 전송 전용 메서드
+    private void SendReliable(NetworkPacket packet, IPEndPoint clientEP)
+    {
+        NetworkPacket outgoing = ClonePacket(packet);
+
+        uint seq = (uint)Interlocked.Increment(ref _nextSequence);
+        outgoing.Sequence = seq;
+        outgoing.IsReliable = true;
+
+        _pendingPackets[seq] = new PendingPacket
+        {
+            Packet = outgoing,
+            TargetEndPoint = clientEP,
+            LastSentTime = DateTime.UtcNow,
+            RetryCount = 0
+        };
+
+        byte[] data = outgoing.ToBytes();
+        _socket.SendTo(data, clientEP);
+    }
+    
     // 타임아웃 패킷 전송
     private void SendPlayerTimeout(int playerId, IPEndPoint playerEndPoint)
     {
@@ -559,10 +704,11 @@ public class UDPGameServer : IDisposable
             };
             
             // 패킷을 바이트 배열로 변환
-            byte[] data = packet.ToBytes();
+            // byte[] data = packet.ToBytes();
             // 클라이언트에게 패킷 전송
-            _socket.SendTo(data, clientEP);
+            // _socket.SendTo(data, clientEP);
             
+            SendReliable(packet, clientEP);
             _stats.IncrementSentPackets();
             
             Console.WriteLine($"[서버] PlayerSpawn 패킷 전송 성공 to {clientEP}");
@@ -631,11 +777,12 @@ public class UDPGameServer : IDisposable
                 Timestamp = DateTime.UtcNow
             };
             
-            byte[] data = packet.ToBytes();
+            // byte[] data = packet.ToBytes();
             int sentCount = 0;
             foreach (var existPlayer in _players.Values)
             {
-                _socket.SendTo(data, existPlayer.EndPoint);
+                // _socket.SendTo(data, existPlayer.EndPoint);
+                SendReliable(packet, existPlayer.EndPoint);
                 sentCount++;
             }
             _stats.IncrementSentPackets(sentCount);
@@ -702,11 +849,12 @@ public class UDPGameServer : IDisposable
                 Timestamp = DateTime.UtcNow
             };
             
-            byte[] data = firePacket.ToBytes();
+            // byte[] data = firePacket.ToBytes();
             int sentCount = 0;
             foreach (var existPlayer in _players.Values)
             {
-                _socket.SendTo(data, existPlayer.EndPoint);
+                // _socket.SendTo(data, existPlayer.EndPoint);
+                SendReliable(firePacket, existPlayer.EndPoint);
                 sentCount++;
             }
             
@@ -732,12 +880,13 @@ public class UDPGameServer : IDisposable
                 Timestamp = DateTime.UtcNow
             };
             
-            byte[] data = hitPacket.ToBytes();
+            // byte[] data = hitPacket.ToBytes();
             int sentCount = 0;
             
             foreach (var existPlayer in _players.Values)
             {
-                _socket.SendTo(data, existPlayer.EndPoint);
+                // _socket.SendTo(data, existPlayer.EndPoint);
+                SendReliable(hitPacket, existPlayer.EndPoint);
                 sentCount++;
             }
             
@@ -763,12 +912,13 @@ public class UDPGameServer : IDisposable
                 Timestamp = DateTime.UtcNow
             };
 
-            byte[] data = consumedPacket.ToBytes();
+            // byte[] data = consumedPacket.ToBytes();
             int sentCount = 0;
             
             foreach (var existPlayer in _players.Values)
             {
-                _socket.SendTo(data, existPlayer.EndPoint);
+                // _socket.SendTo(data, existPlayer.EndPoint);
+                SendReliable(consumedPacket, existPlayer.EndPoint);
                 sentCount++;
             }
             
@@ -793,12 +943,13 @@ public class UDPGameServer : IDisposable
                 Timestamp = DateTime.UtcNow
             };
             
-            byte[] data = emoticonPacket.ToBytes();
+            // byte[] data = emoticonPacket.ToBytes();
             int sentCount = 0;
 
             foreach (var existPlayer in _players.Values)
             {
-                _socket.SendTo(data, existPlayer.EndPoint);
+                // _socket.SendTo(data, existPlayer.EndPoint);
+                SendReliable(emoticonPacket, existPlayer.EndPoint);
                 sentCount++;
             }
             
