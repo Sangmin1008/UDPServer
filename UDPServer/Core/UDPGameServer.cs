@@ -161,44 +161,42 @@ public class UDPGameServer : IDisposable
     private void ReceiveLoop()
     {
         Console.WriteLine("[서버] 수신 루프 시작");
-        // 패킷 수신용 버퍼
-        // byte[] buffer = new byte[_config.BufferSize];
-        EndPoint clientEP = new IPEndPoint(IPAddress.Any, _config.ServerPort);
+
         while (_isRunning)
         {
-            // ArrayPool Rent
             byte[] buffer = ArrayPool<byte>.Shared.Rent(_config.BufferSize);
+
             try
             {
-                int receiveBytes = _socket.ReceiveFrom(buffer, ref clientEP);
+                // ReceiveFrom이 채워 넣을 임시 endpoint
+                EndPoint remoteEP = new IPEndPoint(IPAddress.Any, 0);
 
-                if (receiveBytes > 0)
-                {
-                    // 수신 패킷 증가
-                    _stats.IncrementReceivedPackets();
-                    
-                    byte[] data = new byte[receiveBytes];
-                    Buffer.BlockCopy(buffer, 0, data, 0, receiveBytes);
-                    
-                    PacketJob job = new PacketJob(
+                int receiveBytes = _socket.ReceiveFrom(buffer, ref remoteEP);
+
+                if (receiveBytes <= 0)
+                    continue;
+
+                _stats.IncrementReceivedPackets();
+
+                // 실제 받은 크기만큼 복사
+                byte[] data = new byte[receiveBytes];
+                Buffer.BlockCopy(buffer, 0, data, 0, receiveBytes);
+
+                // 중요: remoteEP는 다음 ReceiveFrom에서 다시 바뀌므로
+                // Job에는 반드시 값 복사본을 넣는다.
+                IPEndPoint ep = (IPEndPoint)remoteEP;
+                IPEndPoint endpointCopy = new IPEndPoint(ep.Address, ep.Port);
+
+                PacketJob job = new PacketJob(
                     this,
-                        data,
-                        receiveBytes,
-                        (IPEndPoint)clientEP
-                    );
-                    
-                    _jobQueue.Enqueue(job);
-                    Console.WriteLine($"[서버] {clientEP} 로부터 {receiveBytes} 바이트 수산");
-                    
-                    // // 수신된 바이트 배열을 실제 데이터 크기 만큼 복사
-                    // byte[] data = new byte[receiveBytes];
-                    // // 버퍼에서 실제 수신된 데이터만 복사
-                    // Array.Copy(buffer, data, receiveBytes);
-                    //
-                    //
-                    // // 수신된 데이터 처리 로직 (패킷 파싱)
-                    // ProcessPacket(data, (IPEndPoint)clientEP);
-                }
+                    data,
+                    receiveBytes,
+                    endpointCopy
+                );
+
+                _jobQueue.Enqueue(job);
+
+                Console.WriteLine($"[서버] {endpointCopy} 로부터 {receiveBytes} 바이트 수신");
             }
             catch (SocketException e)
             {
@@ -213,7 +211,7 @@ public class UDPGameServer : IDisposable
                 ArrayPool<byte>.Shared.Return(buffer);
             }
         }
-        
+
         Console.WriteLine("[서버] 수신 루프 종료");
     }
 
@@ -441,13 +439,15 @@ public class UDPGameServer : IDisposable
     private void HandlePlayerJoin(NetworkPacket packet, IPEndPoint clientEP)
     {
         string endpointKey = GetEndpointKey(clientEP);
+        int assignedPlayerId;
 
         lock (_joinLock)
         {
-            if (_endpointToPlayerId.ContainsKey(endpointKey))
+            if (_endpointToPlayerId.TryGetValue(endpointKey, out assignedPlayerId))
             {
-                Console.WriteLine($"[서버] 중복 Join 요청 무시 : {clientEP}");
-                return;
+                // 이미 접속한 유저의 재전송된 Join 패킷이면 무시
+                Console.WriteLine($"[서버] 중복 Join 요청 무시 (이미 ID {assignedPlayerId} 발급됨) : {clientEP}");
+                return; 
             }
 
             if (_players.Count >= _config.MaxPlayers)
@@ -456,26 +456,25 @@ public class UDPGameServer : IDisposable
                 return;
             }
 
-            int newPlayerId = Interlocked.Increment(ref _nextPlayerId);
-            PlayerData newPlayer = new PlayerData(newPlayerId, clientEP);
+            assignedPlayerId = Interlocked.Increment(ref _nextPlayerId);
+            PlayerData newPlayer = new PlayerData(assignedPlayerId, clientEP);
             newPlayer.UpdateTransform(packet.Position, packet.Rotation);
 
-            if (!_players.TryAdd(newPlayerId, newPlayer))
-            {
-                Console.WriteLine($"[서버] 플레이어 {newPlayerId} 등록 실패 : {clientEP}");
-                return;
-            }
+            _players.TryAdd(assignedPlayerId, newPlayer);
 
-            _endpointToPlayerId[endpointKey] = newPlayerId;
+            _endpointToPlayerId[endpointKey] = assignedPlayerId;
 
-            Console.WriteLine($"[서버] 플레이어 {newPlayerId} 접속 성공 : {clientEP}");
         }
+        Console.WriteLine($"[서버] 플레이어 {assignedPlayerId} 접속 성공 : {clientEP}");
 
         // 락 밖에서 전송
         _stats.IncrementJoins(_players.Count);
+        
+        SendJoinSuccess(assignedPlayerId, clientEP);
 
-        SendPlayerSpawn(_players.Values.First(p => p.EndPoint.Equals(clientEP)), clientEP);
-        BroadcastPlayerSpawn(_players.Values.First(p => p.EndPoint.Equals(clientEP)));
+        var player = _players[assignedPlayerId];
+        SendPlayerSpawn(player, clientEP);
+        BroadcastPlayerSpawn(player);
         SendExistingPlayers(clientEP);
     }
     
@@ -624,6 +623,17 @@ public class UDPGameServer : IDisposable
     #endregion
 
     #region 패킷 전송 메서드
+    private void SendJoinSuccess(int playerId, IPEndPoint clientEP)
+    {
+        NetworkPacket packet = new NetworkPacket
+        {
+            Type = PacketType.JoinSuccess,
+            PlayerId = playerId,
+            Timestamp = DateTime.UtcNow
+        };
+        
+        SendReliable(packet, clientEP); 
+    }
     
     private NetworkPacket ClonePacket(NetworkPacket src)
     {

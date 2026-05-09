@@ -23,6 +23,7 @@ public enum PacketType
     ItemConsumed = 12,  // 아이템 소비
     PlayerEmoticon = 13,// 이모티콘
     
+    JoinSuccess = 14,   // 접속 성공
     Ack = 99            // 수신 확인 응답
 }
 
