@@ -92,6 +92,7 @@ public class UDPGameServer : IDisposable
         }
         _isRunning = true;
         Console.WriteLine("[서버] 서버 시작...");
+        Console.WriteLine($"[서버] 현재 시간 : {DateTime.Now}");
         
         // 로직 스레드 시작
         StartLogicThread();
@@ -228,11 +229,9 @@ public class UDPGameServer : IDisposable
         {
             while (_isRunning && !token.IsCancellationRequested)
             {
-                // 10초 ~ 15초 사이의 무작위 대기 시간
                 int waitTime = random.Next(10000, 15000);
                 await Task.Delay(waitTime, token);
 
-                // 💡 접속한 플레이어가 2명 이상일 때만 스폰
                 if (_players.Count >= 2)
                 {
                     SpawnRandomItem(random);
@@ -486,6 +485,13 @@ public class UDPGameServer : IDisposable
             _endpointToPlayerId.TryRemove(GetEndpointKey(removedPlayer.EndPoint), out _);
             Console.WriteLine($"[서버] 플레이어 접속해제 - id: {removedPlayer.PlayerId}, EP: {removedPlayer.EndPoint}");
             
+            var epKey = GetEndpointKey(removedPlayer.EndPoint);
+            foreach (var kvp in _pendingPackets)
+            {
+                if (GetEndpointKey(kvp.Value.TargetEndPoint) == epKey)
+                    _pendingPackets.TryRemove(kvp.Key, out _);
+            }
+            
             // 다른 플레이어에게 접속 해제 알림 전송
             BroadcastPlayerDespawn(removedPlayer.PlayerId);
         }
@@ -686,8 +692,10 @@ public class UDPGameServer : IDisposable
                 PlayerId = playerId,
             };
 
-            byte[] data = timeoutPacket.ToBytes();
-            _socket.SendTo(data, playerEndPoint);
+            // byte[] data = timeoutPacket.ToBytes();
+            // _socket.SendTo(data, playerEndPoint);
+            
+            SendReliable(timeoutPacket, playerEndPoint);
             
             _stats.IncrementSentPackets();
             Console.WriteLine($"[서버] 플레이어 {playerId} 타임아웃 패킷 전송 완료 to {playerEndPoint}");
@@ -984,6 +992,9 @@ public class UDPGameServer : IDisposable
         _itemSpawnCts?.Cancel();
         _itemSpawnCts?.Dispose();
         _activeItems.Clear();
+        _pendingPackets.Clear();
+        _processedReliablePackets.Clear();
+        _endpointToPlayerId.Clear();
         
         Console.WriteLine("[서버] UDP 게임 서버 종료");
     }
