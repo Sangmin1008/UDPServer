@@ -3,11 +3,12 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using System.Numerics;
+using MemoryPack;
 using UDPServer.Models;
 
 namespace UDPServer.Core;
 
-public class UDPGameServer : IDisposable
+public partial class UDPGameServer : IDisposable
 {
     private readonly ServerConfig _config;
     private Socket _socket;
@@ -27,6 +28,9 @@ public class UDPGameServer : IDisposable
     private int _nextItemId = 0;
     private readonly ConcurrentDictionary<int, NetworkPacket> _activeItems;
     private CancellationTokenSource? _itemSpawnCts;
+
+    private ConcurrentBag<SocketAsyncEventArgs> _saeaPool;
+    private const int MAX_CONCURRENT_RECEIVES = 20;
     
     // 서버 통계 수집
     private readonly ServerStats _stats;
@@ -58,11 +62,8 @@ public class UDPGameServer : IDisposable
     {
         try
         {
-            // UDP 소캣 생성 (IPv4 32Bit, IPv6 128Bit)
             _socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-            // 소캣옵션 설정 - 주소를 재사용 허용
             _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-            // 소캣 바인딩 - 서버 IP와 포트로 바인딩
             IPEndPoint serverEndPoint = new IPEndPoint(IPAddress.Parse(_config.ServerIP), _config.ServerPort);
             _socket.Bind(serverEndPoint);
             
@@ -71,6 +72,19 @@ public class UDPGameServer : IDisposable
             
             _watchdogTimer = new Timer(CheckPendingPackets, null, 100, 100);
             
+            _saeaPool = new ConcurrentBag<SocketAsyncEventArgs>();
+            for (int i = 0; i < MAX_CONCURRENT_RECEIVES; i++)
+            {
+                var saea = new SocketAsyncEventArgs();
+                saea.Completed += OnReceiveCompleted;
+                
+                byte[] buffer = ArrayPool<byte>.Shared.Rent(_config.BufferSize);
+                saea.SetBuffer(buffer, 0, _config.BufferSize);
+                
+                _saeaPool.Add(saea);
+            }
+            
+            Console.WriteLine($"[서버] IOCP/SAEA 수신 풀 초기화 완료 (Concurrent: {MAX_CONCURRENT_RECEIVES})");
             Console.WriteLine($"[서버] 초기화 완료 : {_config.ServerIP}:{_config.ServerPort}");
         }
         catch (Exception e)
@@ -80,7 +94,62 @@ public class UDPGameServer : IDisposable
         }
     }
 
-    
+    #region IOCP SAEA 수신 루프
+
+    private void StartReceive(SocketAsyncEventArgs saea)
+    {
+        if (!_isRunning) return;
+
+        saea.RemoteEndPoint = new IPEndPoint(IPAddress.Any, 0);
+
+        try
+        {
+            bool isPending = _socket.ReceiveFromAsync(saea);
+            if (!isPending)
+            {
+                ProcessReceiveCompleted(saea);
+            }
+        }
+        catch (Exception e)
+        {
+            
+        }
+    }
+
+    private void OnReceiveCompleted(object? sender, SocketAsyncEventArgs e)
+    {
+        ProcessReceiveCompleted(e);
+    }
+
+    private void ProcessReceiveCompleted(SocketAsyncEventArgs e)
+    {
+        if (_isRunning && e.SocketError == SocketError.Success && e.BytesTransferred > 0)
+        {
+            _stats.IncrementReceivedPackets();
+            
+            IPEndPoint remoteEP = (IPEndPoint)e.RemoteEndPoint;
+            IPEndPoint endpointCopy = new IPEndPoint(remoteEP.Address, remoteEP.Port);
+            
+            byte[] jobBuffer = ArrayPool<byte>.Shared.Rent(e.BytesTransferred);
+            
+            Span<byte> sourceSpan = new Span<byte>(e.Buffer!, e.Offset, e.BytesTransferred);
+            Span<byte> destSpan = new Span<byte>(jobBuffer, 0, e.BytesTransferred);
+            sourceSpan.CopyTo(destSpan);
+
+            // JobQueue 적재 (PacketJob이 처리를 마치면 jobBuffer를 반환하도록 설계)
+            PacketJob job = new PacketJob(
+                this,
+                jobBuffer,             // 실제 데이터가 복사된 렌탈 버퍼
+                e.BytesTransferred, // 실제 데이터 길이
+                endpointCopy           // 깊은 복사된 안전한 주소
+            );
+            _jobQueue.Enqueue(job);
+        }
+        
+        StartReceive(e);
+    }
+
+    #endregion
 
     // 서버 시작 메서드
     public async Task StartAsync()
@@ -99,9 +168,13 @@ public class UDPGameServer : IDisposable
         
         _itemSpawnCts = new CancellationTokenSource();
         _ = ItemSpawnLoopAsync(_itemSpawnCts.Token);
-        
+
+        while (_saeaPool.TryTake(out var saea))
+        {
+            StartReceive(saea);
+        }
         // 비동기 수신 루프 시작
-        await Task.Run(ReceiveLoop);
+        // await Task.Run(ReceiveLoop);
     }
     
     // 패킷 처리 로직 스레드
@@ -284,8 +357,8 @@ public class UDPGameServer : IDisposable
     {
         try
         {
-            // 바이트 배열을 NetworkPacket 객체로 변환
-            NetworkPacket? packet = NetworkPacket.FromBytes(data, bufferSize);
+            ReadOnlySpan<byte> packetSpan = new ReadOnlySpan<byte>(data, 0, bufferSize);
+            NetworkPacket? packet = MemoryPackSerializer.Deserialize<NetworkPacket>(packetSpan);
 
             if (packet == null)
             {
@@ -397,22 +470,17 @@ public class UDPGameServer : IDisposable
             // 보낸 지 200ms가 넘었는데 아직 안 지워졌다면 유실 간주
             if ((now - pending.LastSentTime).TotalMilliseconds > 200)
             {
-                if (pending.RetryCount < 5) // 최대 5회 재전송
+                if (pending.RetryCount >= 5) // 최대 재전송 횟수 초과
                 {
-                    pending.RetryCount++;
-                    pending.LastSentTime = now;
-                    
-                    // 다시 전송
-                    byte[] data = pending.Packet.ToBytes();
-                    _socket.SendTo(data, pending.TargetEndPoint);
-                    Console.WriteLine($"[서버] 패킷 {kvp.Key}({pending.Packet.Type}) 재전송 시도 {pending.RetryCount}회");
-                }
-                else
-                {
-                    // 5회 모두 실패하면 포기하고 장부에서 삭제
-                    Console.WriteLine($"[서버] 패킷 {kvp.Key} 최종 전송 실패. 타임아웃 처리");
+                    Console.WriteLine($"[서버] 패킷 {pending.Sequence} 재전송 실패. (연결 불안정)");
                     _pendingPackets.TryRemove(kvp.Key, out _);
+                    continue;
                 }
+
+                pending.RetryCount++;
+                pending.LastSentTime = now;
+
+                _socket.SendTo(pending.Payload, pending.TargetEndPoint);
             }
         }
     }
@@ -663,22 +731,24 @@ public class UDPGameServer : IDisposable
     // 중요 데이터 전송 전용 메서드
     private void SendReliable(NetworkPacket packet, IPEndPoint clientEP)
     {
-        NetworkPacket outgoing = ClonePacket(packet);
-
         uint seq = (uint)Interlocked.Increment(ref _nextSequence);
-        outgoing.Sequence = seq;
-        outgoing.IsReliable = true;
+        packet.Sequence = seq;
+        packet.IsReliable = true;
 
-        _pendingPackets[seq] = new PendingPacket
+        byte[] binaryData = MemoryPackSerializer.Serialize(packet);
+
+        var pending = new PendingPacket
         {
-            Packet = outgoing,
+            Payload = binaryData,
             TargetEndPoint = clientEP,
+            Sequence = seq,
             LastSentTime = DateTime.UtcNow,
             RetryCount = 0
         };
+        
+        _pendingPackets.TryAdd(seq, pending);
 
-        byte[] data = outgoing.ToBytes();
-        _socket.SendTo(data, clientEP);
+        _socket.SendTo(binaryData, clientEP);
     }
     
     // 타임아웃 패킷 전송

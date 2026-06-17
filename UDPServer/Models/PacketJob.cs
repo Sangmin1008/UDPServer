@@ -28,7 +28,7 @@ public class PacketJob : IJob
         catch (Exception e)
         {
             Console.WriteLine($"[서버] PacketJob 설정 오류 : {e.Message}");
-            // ArrayPool<byte>.Shared.Return(_buffer);
+            ArrayPool<byte>.Shared.Return(_buffer);
         }
     }
 }
